@@ -238,7 +238,7 @@
     <Link>
       <AdditionalOptions>/export:main %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>pin.lib;libxed.lib;libcpmt.lib;libcmt.lib;pinvm.lib;kernel32.lib;ntdll-64.lib</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\..\intel64\lib;..\..\..\intel64\lib-ext;..\..\..\extras\xed-intel64\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>..\pin-2.14-71313-msvc12-windows\intel64\lib;..\pin-2.14-71313-msvc12-windows\intel64\lib-ext;..\pin-2.14-71313-msvc12-windows\extras\xed-intel64\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>true</GenerateDebugInformation>

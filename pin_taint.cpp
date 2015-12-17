@@ -6,9 +6,11 @@
 #include "pin.H"
 #include "common.h"
 #include "CachedDict.h"
+#include "ShadowCpu.h"
 
 CachedDict<ADDRINT, UINT8> shadow_taint_memory;
-CONTEXT * global_contexts[1024];
+
+ShadowCpu * global_contexts[1024];
 int  global_icount = 0;
 PIN_RWMUTEX mutex;
 bool global_taint_enable;
@@ -31,18 +33,18 @@ CachedDict<ADDRINT, InstRegRecord *> global_inst_reg_record;
 VOID doTaint(ADDRINT addr, ADDRINT size, UINT8 tag)
 {
 	PIN_RWMutexWriteLock(&mutex);
-	for (int i = 0; i != size; i++)
+	for (ADDRINT i = 0; i != size; i++)
 	{
 		shadow_taint_memory[addr+i] |= tag;
 	}
-	MSG("[0x%llx:0x%llx] source tainted", addr, addr+size);
+	MSG("[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] source tainted", addr, addr+size);
     global_taint_enable = true;
 	PIN_RWMutexUnlock(&mutex);
 }
 VOID BeforeSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID *)
 {
 	if (threadIndex >= sizeof(global_contexts) / sizeof(CONTEXT *))
-		ERROR("thread_is %d is larger than size of global_contexts", threadIndex);	
+		ERROR("thread_id %d is larger than size of global_contexts", threadIndex);	
 	global_syscall_record[threadIndex].syscall_num = PIN_GetSyscallNumber(ctxt, std);
 	for (int i = 0; i < 4; i ++)
 	{
@@ -52,7 +54,7 @@ VOID BeforeSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VO
 VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID *)
 {
 	if (threadIndex >= sizeof(global_contexts) / sizeof(CONTEXT *))
-		ERROR("thread_is %d is larger than size of global_contexts", threadIndex);	
+		ERROR("thread_id %d is larger than size of global_contexts", threadIndex);	
 	const InputSyscallRecord &record = global_syscall_record[threadIndex];
 	ADDRINT retv = PIN_GetSyscallReturn(ctxt, std);
 #ifdef TARGET_MAC
@@ -62,7 +64,7 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 	ADDRINT syscall_num = record.syscall_num;
 #endif
 #ifndef TARGET_WINDOWS
-	if (retv == -1) return;
+	if (retv == (ADDRINT)-1) return;
 	if (syscall_num == SYS_recvfrom)
 		doTaint(record.args[1], retv, 1);
 #ifdef TARGET_LINUX
@@ -76,31 +78,37 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI_MEM_ACCESS_INFO* muliti_mem_access_info, const InstRegRecord * instRegRecord)
 {
 	global_icount += 1;
-	//if ((global_icount &0xffff) == 0) MSG("%x", global_icount);
-    //if (!global_taint_enable) return;
+	MSG("%" FORMAT_ADDR_X, inst_addr);
 	if (thread_id >= sizeof(global_contexts) / sizeof(CONTEXT *))
-		ERROR("thread_is %d is larger than size of global_contexts", thread_id);
-	CONTEXT * context = global_contexts[thread_id];
-	if (!context) context = new CONTEXT;
+		ERROR("thread_id %d is larger than size of global_contexts", thread_id);
+	ShadowCpu * context = global_contexts[thread_id];
+	if (!context) context = new ShadowCpu;
 	if (!context) ERROR("malloc new context for thread %d fail", thread_id);
 
 	global_contexts[thread_id] = context;
-	PIN_REGISTER taint;
+	TAG_t taint[16];
 	memset(&taint, 0, sizeof(taint));
 	REG reg;
-	//auto instRegRecord = global_inst_reg_record[inst_addr];
 	for (int i = 0; i != instRegRecord->numberOfReadRegs; i++)
 	{
 		reg = instRegRecord->readRegs[i];
-		PIN_REGISTER readReg;
-		//if (reg>=REG_MACHINE_LAST || reg == REG_X87) continue;
-		//PIN_GetContextRegval(context, reg, (UINT8 *)&readReg);
+		TAG_t * readTag = context->getTagPointerOfReg(reg);
 		for (UINT32 j = 0; j < REG_Size(reg); j++)
 		{
-			taint.byte[j] |= readReg.byte[j];
+			//MSG("[%" FORMAT_ADDR_X "]" "read %s", inst_addr, REG_StringShort(reg).c_str());
+			taint[j] |= readTag[j];
 		}
 	}
-
+	bool tainted = false;
+	for (ADDRINT i = 0; i < 16; i++)
+	{
+		if (taint[i]) 
+		{
+			tainted = true;
+			break;
+		}
+	}
+	//if (tainted) MSG("Source reg tainted at inst 0x%" FORMAT_ADDR_X,inst_addr);
 	PIN_RWMutexWriteLock(&mutex);
 	if (muliti_mem_access_info)
 	{
@@ -109,17 +117,17 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 			const PIN_MEM_ACCESS_INFO &info = muliti_mem_access_info->memop[i];
 			if (info.memopType == PIN_MEMOP_LOAD)
 			{
-				for (int index = 0; index != info.bytesAccessed; index++)
+				for (ADDRINT index = 0; index != info.bytesAccessed; index++)
 				{
-					taint.byte[index] |= shadow_taint_memory[info.memoryAddress+index];
+					taint[index] |= shadow_taint_memory[info.memoryAddress+index];
 				}
 			}
 		}
 	}
-	bool tainted = false;
-	for (int i = 0; i < MAX_QWORDS_PER_PIN_REG; i++)
+	//bool tainted = false;
+	for (ADDRINT i = 0; i < 16; i++)
 	{
-		if (taint.qword[i]) 
+		if (taint[i]) 
 		{
 			tainted = true;
 			break;
@@ -134,24 +142,26 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 			if (info.memopType == PIN_MEMOP_STORE)
 			{
 				memSink = true;
-				for (int index=0; index != info.bytesAccessed; index++)
-					shadow_taint_memory[info.memoryAddress+index] = taint.byte[index];
+				for (ADDRINT index=0; index != info.bytesAccessed; index++)
+					shadow_taint_memory[info.memoryAddress+index] = taint[index];
 			}
 		}
 	}
+	//if (tainted) MSG("Source reg tainted at inst 0x%" FORMAT_ADDR_X,inst_addr);
 	PIN_RWMutexUnlock(&mutex);
 
-	//if (tainted && memSink) MSG("TAINTED mem at inst %016llx",inst_addr);
-	//if (tainted && !memSink && instRegRecord->numberOfWriteRegs) MSG("TAINTED reg at inst %016llx",inst_addr);
+	if (tainted && memSink) MSG("TAINTED mem at inst 0x%" FORMAT_ADDR_X,inst_addr);
+	if (tainted && !memSink && instRegRecord->numberOfWriteRegs) MSG("TAINTED reg at inst 0x%" FORMAT_ADDR_X,inst_addr);
+	MSG("%d", instRegRecord->numberOfReadRegs);
+	MSG("%d", instRegRecord->numberOfWriteRegs);
 	for (int i = 0; i != instRegRecord->numberOfWriteRegs; i++)
 	{
 		reg = instRegRecord->writeRegs[i];
 		//if (reg>=REG_MACHINE_LAST || reg == REG_X87) continue;
-		PIN_REGISTER writeReg;
-		memset(&writeReg, 0, sizeof(writeReg));
-		if (memSink) return;
-			memcpy(&writeReg, &taint, REG_Size(reg));
-		//PIN_SetContextRegval(context, reg, (UINT8 *)&writeReg);
+		TAG_t * writeTag = context->getTagPointerOfReg(reg);
+		memset(writeTag, 0, REG_Size(reg) * sizeof(TAG_t));
+		if (!memSink)
+			memcpy(writeTag, &taint[0], REG_Size(reg) * sizeof(TAG_t));
 	}
 }
 VOID InstrunctionInstrument(INS ins, VOID *)
@@ -159,10 +169,11 @@ VOID InstrunctionInstrument(INS ins, VOID *)
 	bool hasRead = (INS_RegR(ins, 0) != REG_INVALID_) || (INS_IsMemoryRead(ins));
 	bool hasWrite = (INS_RegW(ins, 0) != REG_INVALID_) || (INS_IsMemoryWrite(ins));
 	bool hasMem = (INS_IsMemoryRead(ins) || INS_IsMemoryWrite(ins)); 
+	//if ((INS_Address(ins)&0xffffffff) != INS_Address(ins)) return;
 	if (hasRead && hasWrite)
 	{
 		//MSG("%d %d", INS_RegR(ins, 0), REG_INVALID_);
-		//MSG("Insert TrasferInstrucion Handle for %016llx:%x:%s", INS_Address(ins), ins.q(), INS_Disassemble(ins).c_str());
+		MSG("Insert TrasferInstrucion Handle for %016" FORMAT_ADDR_X ":%x:%s", INS_Address(ins), ins.q(), INS_Disassemble(ins).c_str());
 		if (!global_inst_reg_record[INS_Address(ins)])
 			if (!(global_inst_reg_record[INS_Address(ins)] = new InstRegRecord)) ERROR("malloc new InstRegRecord failed");
 		InstRegRecord * instRegRecord = global_inst_reg_record[INS_Address(ins)];

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 
 //#define BIGENDIAN
@@ -37,4 +38,18 @@ typedef int32_t int_t;
 #endif
 #endif
 
+#ifndef BITS
+#error("BITS not defined")
+#endif
 
+#if BITS==64
+#define FORMAT_ADDR_X PRIx64
+#define FORMAT_ADDR_U PRIu64
+#elif BITS==32
+#define FORMAT_ADDR_X PRIx32
+#define FORMAT_ADDR_U PRIu32
+#else
+#error("BITS not 64/32")
+#endif
+
+typedef uint32_t TAG_t;

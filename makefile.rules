@@ -72,12 +72,9 @@ LIB_ROOTS :=
 
 # This section contains the build rules for all binaries that have special build rules.
 # See makefile.default.rules for the default build rules.
-
 SRCS := $(wildcard *.cpp)
 DEPS := $(addprefix $(OBJDIR), $(patsubst %.cpp,%.d,$(SRCS)))
 OBJS := $(patsubst %.d,%$(OBJ_SUFFIX),$(DEPS)) 
-#CXX := clang++
-#LINKER := clang++
 objects : $(OBJDIR) $(OBJS)
 libs: $(OBJDIR)$(TEST_TOOL_ROOTS)$(PINTOOL_SUFFIX)
 dlls:
@@ -85,9 +82,14 @@ apps:
 tools:
 clean:
 	rm -rf $(OBJDIR)
+
+
+TOOL_CXXFLAGS := $(TOOL_CXXFLAGS) -DBITS=$(BITS)
 $(OBJDIR):
 	mkdir $(OBJDIR)
 $(OBJDIR)%$(OBJ_SUFFIX): %.cpp| $(OBJDIR)
-	$(CXX) $(TOOL_CXXFLAGS) -std=c++14 $(COMP_OBJ)$@ $(patsubst $(OBJDIR)%$(OBJ_SUFFIX),%.cpp,$@)
+	$(CXX) $(TOOL_CXXFLAGS) -std=c++11 $(COMP_OBJ)$@ $(patsubst $(OBJDIR)%$(OBJ_SUFFIX),%.cpp,$@)
 $(OBJDIR)$(TEST_TOOL_ROOTS)$(PINTOOL_SUFFIX): $(OBJS) | $(OBJDIR)
 	$(LINKER) $(TOOL_LDFLAGS) $(LINK_EXE)$@ $(^:%.h=) $(TOOL_LPATHS) $(TOOL_LIBS)
+info:
+	echo $(BITS)

@@ -6,6 +6,13 @@
 #include "CachedDict.h"
 #include "ShadowCpu.h"
 
+#ifdef TARGET_WINDOWS
+ADDRINT SYS_ReadFile;
+#define SYSCALL_ARG_COUNT 8
+#else
+ADDRINT SYS_ReadFIle;
+#endif
+
 CachedDict<ADDRINT, UINT8> shadow_taint_memory;
 
 ShadowCpu * global_contexts[1024];
@@ -15,7 +22,7 @@ bool global_taint_enable;
 struct InputSyscallRecord
 {
 	ADDRINT syscall_num;
-	ADDRINT args[4];
+	ADDRINT args[SYSCALL_ARG_COUNT];
 };
 struct InstRegRecord
 {
@@ -36,6 +43,7 @@ VOID doTaint(ADDRINT addr, ADDRINT size, UINT8 tag)
 		shadow_taint_memory[addr+i] |= tag;
 	}
 	MSG("[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] source tainted", addr, addr+size);
+	MSG("xx %04s", (char *)addr);
     global_taint_enable = true;
 	PIN_RWMutexUnlock(&mutex);
 }
@@ -44,7 +52,7 @@ VOID BeforeSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VO
 	if (threadIndex >= sizeof(global_contexts) / sizeof(CONTEXT *))
 		ERROR("thread_id %d is larger than size of global_contexts", threadIndex);	
 	global_syscall_record[threadIndex].syscall_num = PIN_GetSyscallNumber(ctxt, std);
-	for (int i = 0; i < 4; i ++)
+	for (int i = 0; i < SYSCALL_ARG_COUNT; i ++)
 	{
 		global_syscall_record[threadIndex].args[i] = PIN_GetSyscallArgument(ctxt, std, i);
 	}
@@ -61,7 +69,7 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 #else
 	ADDRINT syscall_num = record.syscall_num;
 #endif
-#ifndef TARGET_WINDOWS
+#ifndef TARGET_WINDOWS //Linux or Mac
 	if (retv == (ADDRINT)-1) return;
 	if (syscall_num == SYS_recvfrom)
 		doTaint(record.args[1], retv, 1);
@@ -71,6 +79,13 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 	else if (syscall_num == SYS_read || syscall_num == SYS_read_nocancel)
 #endif
 		doTaint(record.args[1], retv, 1);
+#else    //Windows
+	if (retv < 0) return;
+	MSG("%x is called bak", syscall_num);
+	if (syscall_num == SYS_ReadFile)
+	{
+		doTaint(record.args[5], record.args[6], 1);
+	}
 #endif
 }
 VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI_MEM_ACCESS_INFO* muliti_mem_access_info, const InstRegRecord * instRegRecord)
@@ -140,11 +155,14 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 			if (info.memopType == PIN_MEMOP_STORE)
 			{
 				memSink = true;
-				if (tainted && memSink) 
-					MSG("TAINTED mem[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] at inst 0x%" FORMAT_ADDR_X, 
+				if (tainted && memSink)
+				{
+					MSG("TAINTED mem[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] at inst 0x%" FORMAT_ADDR_X,
 						info.memoryAddress,
-						info.memoryAddress+info.bytesAccessed,
+						info.memoryAddress + info.bytesAccessed,
 						inst_addr);
+					
+				}
 				for (ADDRINT index=0; index != info.bytesAccessed; index++)
 					shadow_taint_memory[info.memoryAddress+index] = taint[index];
 			}
@@ -159,9 +177,13 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 		//if (reg>=REG_MACHINE_LAST || reg == REG_X87) continue;
 		TAG_t * writeTag = context->getTagPointerOfReg(reg);
 		memset(writeTag, 0, REG_Size(reg) * sizeof(TAG_t));
-		if (tainted && !memSink && instRegRecord->numberOfWriteRegs) MSG("TAINTED %s at inst 0x%" FORMAT_ADDR_X,REG_StringShort(reg).c_str(), inst_addr);
-		if (!memSink)
-			memcpy(writeTag, &taint[0], REG_Size(reg) * sizeof(TAG_t));
+		if ((!tainted) || memSink || (instRegRecord->numberOfWriteRegs > 1 && reg == REG_STACK_PTR))
+		{
+			continue;
+		}
+		MSG("TAINTED %s at inst 0x%" FORMAT_ADDR_X,REG_StringShort(reg).c_str(), inst_addr);
+		memcpy(writeTag, &taint[0], REG_Size(reg) * sizeof(TAG_t));
+		
 	}
 }
 VOID InstrunctionInstrument(INS ins, VOID *)
@@ -182,7 +204,7 @@ VOID InstrunctionInstrument(INS ins, VOID *)
 		REG reg;
 		for (int i = 0; (reg=INS_RegR(ins, i)) != REG_INVALID_; i++)
 		{
-			if (reg>=REG_MACHINE_LAST || reg == REG_X87 || reg == REG_EIP 
+			if (reg>REG_MACHINE_LAST || reg == REG_X87 || reg == REG_EIP 
 #if BITS == 32
 				|| reg == REG_EIP
 #elif BITS == 64
@@ -198,7 +220,7 @@ VOID InstrunctionInstrument(INS ins, VOID *)
 		}
 		for (int i = 0; (reg=INS_RegW(ins, i)) != REG_INVALID_; i++)
 		{
-			if (reg>=REG_MACHINE_LAST || reg == REG_X87 
+			if (reg>REG_MACHINE_LAST || reg == REG_X87 
 #if BITS == 32
 				|| reg == REG_EIP 
 #elif BITS == 64
@@ -242,7 +264,29 @@ int main(int argc, char *argv[])
 {
 	// Initialize PIN library. Print help message if -h(elp) is specified
 	// in the command line or the command line is invalid 
-	PIN_RWMutexInit(&mutex);
+	//PIN_RWMutexInit(&mutex);
+#ifdef TARGET_WINDOWS 
+#if BITS==32
+	if (1 == 2);
+	//else if (IsWindows10OrGreater()) {SYS_ReadFIle = 0x10000000;}
+	//else if  (IsWindows8Point1OrGreater()) {SYS_ReadFile = 0x008a;}
+	//else if  (IsWindows8OrGreater()) {SYS_ReadFile = 0x0087;}
+	//else if  (IsWindows7OrGreater()) {SYS_ReadFile = 0x0111;}
+	//else if  (IsWindowsVistaOrGreater()) {SYS_ReadFile = 0x0102;}
+	//else if  (IsWindowsXPOrGreater()) {SYS_ReadFile = 0x00adb7;}
+	SYS_ReadFile = 0xffff;
+#endif
+#if BITS==64
+	if (1 == 2);
+	//else if (IsWindows10OrGreater()) {SYS_ReadFIle = 0x10000000;}
+	//else if  (IsWindows8Point1OrGreater()) {SYS_ReadFile = 0x008a;}
+	//else if  (IsWindows8OrGreater()) {SYS_ReadFile = 0x0087;}
+	//else if  (IsWindows7OrGreater()) {SYS_ReadFile = 0x0111;}
+	//else if  (IsWindowsVistaOrGreater()) {SYS_ReadFile = 0x0102;}
+	//else if  (IsWindowsXPOrGreater()) {SYS_ReadFile = 0x00adb7;}
+	SYS_ReadFile = 0x0003;
+#endif
+#endif
 	if( PIN_Init(argc,argv) )
 	{
 		return Usage();

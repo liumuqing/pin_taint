@@ -1,6 +1,8 @@
+#include "pin.H"
+#include "common.h"
 #include "ShadowCpu.h"
 bool ShadowCpu::_isStaticInited = false;
-uint32_t ShadowCpu::_RegOffsetList[REG_MACHINE_LAST];
+uint32_t ShadowCpu::_RegOffsetList[REG_APPLICATION_LAST+1];
 ShadowCpu::ShadowCpu()
 {
 	if (!_isStaticInited) staticInit();
@@ -9,6 +11,41 @@ ShadowCpu::ShadowCpu()
 void ShadowCpu::staticInit()
 {
 	//memset(_RegOffsetList, 0, sizeof(_RegOffsetList));
+	CONTEXT _c;
+	PIN_REGISTER _r;
+	memset(&_r, 1, sizeof(_r));
+	uint32_t offset_for_xmm_ymm_xmm = 0;
+	for (REG r = REG_APPLICATION_BASE; r != REG_APPLICATION_LAST; r= REG(((int)r)+1))
+	{
+		if (!REG_valid_for_iarg_reg_value(r)) continue;
+		if (REG_is_mm(r)) continue;
+		if (r >= REG_EMM_BASE && r <= REG_EMM_LAST) continue;
+		if (r == REG_X87) continue;
+		if (REG_is_xmm_ymm_zmm(r)) continue;
+		memset(&_c, 0, sizeof(CONTEXT));
+		PIN_SetContextRegval(&_c, r, (const UINT8 *)&_r);
+		uint32_t start, end;
+		uint32_t s = 0;
+		uint32_t j = 0;
+		for (j = 0; j != sizeof(_c); j++)
+			if ((((uint8_t *) &_c)[j]) == 1) s+=1;
+		for (j = 0; j != sizeof(_c); j++)
+			if ((((uint8_t *) &_c)[j]) == 1) break;
+		start = j;
+		for (; j != sizeof(_c); j++)
+			if ((((uint8_t *) &_c)[j]) == 0) break;
+		end = j;
+		if (s!= end-start || (s % 2 != 0 && s!=1)) ERROR("can't init _RegOffsetList[%s], because this register occupy multiple pieces of memory!", REG_StringShort(r).c_str());
+		else _RegOffsetList[r] = start;
+		offset_for_xmm_ymm_xmm = (offset_for_xmm_ymm_xmm>_RegOffsetList[r]?offset_for_xmm_ymm_xmm:_RegOffsetList[r]);
+		if (!_RegOffsetList[r]) ERROR("_RegOffsetList[%s] is initialzed as zero, something wrong...maybe PIN API changed?", REG_StringShort(r).c_str());
+	}
+	for (REG r = REG_XMM_BASE; r != REG_ZMM_LAST; r= REG(((int)r)+1))
+	{
+		if (!REG_is_xmm_ymm_zmm(r)) continue;
+		_RegOffsetList[r] = offset_for_xmm_ymm_xmm; offset_for_xmm_ymm_xmm += 16;
+	}
+	/*
 	_RegOffsetList[REG_RAX] = 8;
 	_RegOffsetList[REG_EAX] = 8;
 	_RegOffsetList[REG_AX] = 8;
@@ -134,6 +171,7 @@ void ShadowCpu::staticInit()
 	_RegOffsetList[REG_SEG_GS] = 0x2c0;
 
 	_isStaticInited = true;
+	*/
 }
 TAG_t * ShadowCpu::getTagPointerOfReg(REG reg)
 {

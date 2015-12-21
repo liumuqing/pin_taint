@@ -1,5 +1,3 @@
-#include <iostream>
-#include <fstream>
 #ifndef TARGET_WINDOWS
 #include <sys/syscall.h>
 #endif
@@ -78,7 +76,7 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI_MEM_ACCESS_INFO* muliti_mem_access_info, const InstRegRecord * instRegRecord)
 {
 	global_icount += 1;
-	MSG("%" FORMAT_ADDR_X, inst_addr);
+	if (!global_taint_enable) return;
 	if (thread_id >= sizeof(global_contexts) / sizeof(CONTEXT *))
 		ERROR("thread_id %d is larger than size of global_contexts", thread_id);
 	ShadowCpu * context = global_contexts[thread_id];
@@ -142,6 +140,11 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 			if (info.memopType == PIN_MEMOP_STORE)
 			{
 				memSink = true;
+				if (tainted && memSink) 
+					MSG("TAINTED mem[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] at inst 0x%" FORMAT_ADDR_X, 
+						info.memoryAddress,
+						info.memoryAddress+info.bytesAccessed,
+						inst_addr);
 				for (ADDRINT index=0; index != info.bytesAccessed; index++)
 					shadow_taint_memory[info.memoryAddress+index] = taint[index];
 			}
@@ -150,16 +153,13 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 	//if (tainted) MSG("Source reg tainted at inst 0x%" FORMAT_ADDR_X,inst_addr);
 	PIN_RWMutexUnlock(&mutex);
 
-	if (tainted && memSink) MSG("TAINTED mem at inst 0x%" FORMAT_ADDR_X,inst_addr);
-	if (tainted && !memSink && instRegRecord->numberOfWriteRegs) MSG("TAINTED reg at inst 0x%" FORMAT_ADDR_X,inst_addr);
-	MSG("%d", instRegRecord->numberOfReadRegs);
-	MSG("%d", instRegRecord->numberOfWriteRegs);
 	for (int i = 0; i != instRegRecord->numberOfWriteRegs; i++)
 	{
 		reg = instRegRecord->writeRegs[i];
 		//if (reg>=REG_MACHINE_LAST || reg == REG_X87) continue;
 		TAG_t * writeTag = context->getTagPointerOfReg(reg);
 		memset(writeTag, 0, REG_Size(reg) * sizeof(TAG_t));
+		if (tainted && !memSink && instRegRecord->numberOfWriteRegs) MSG("TAINTED %s at inst 0x%" FORMAT_ADDR_X,REG_StringShort(reg).c_str(), inst_addr);
 		if (!memSink)
 			memcpy(writeTag, &taint[0], REG_Size(reg) * sizeof(TAG_t));
 	}
@@ -173,7 +173,7 @@ VOID InstrunctionInstrument(INS ins, VOID *)
 	if (hasRead && hasWrite)
 	{
 		//MSG("%d %d", INS_RegR(ins, 0), REG_INVALID_);
-		MSG("Insert TrasferInstrucion Handle for %016" FORMAT_ADDR_X ":%x:%s", INS_Address(ins), ins.q(), INS_Disassemble(ins).c_str());
+		//MSG("Insert TrasferInstrucion Handle for %016" FORMAT_ADDR_X ":%x:%s", INS_Address(ins), ins.q(), INS_Disassemble(ins).c_str());
 		if (!global_inst_reg_record[INS_Address(ins)])
 			if (!(global_inst_reg_record[INS_Address(ins)] = new InstRegRecord)) ERROR("malloc new InstRegRecord failed");
 		InstRegRecord * instRegRecord = global_inst_reg_record[INS_Address(ins)];

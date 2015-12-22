@@ -27,7 +27,7 @@ public:
 		for (int i = 0; i < 4096; i++)
 			cache[i].valid = false;
 	}
-	TypeValue& operator [](TypeKey addr)
+	virtual TypeValue& operator [](TypeKey addr)
 	{
 		TypeKey pageIndex = (addr >> 12);
 		if (cache[pageIndex&0xfff].valid && cache[pageIndex&0xfff].pageIndex == pageIndex)
@@ -58,6 +58,13 @@ public:
 		cache[pageIndex&0xfff].valid = true;
 		return iter->second[addr&0xfff];
 	}
+	~CachedDict()
+	{
+		for (auto iter = pageTable.begin(); iter != pageTable.end(); iter++)
+		{
+			if (iter->second) delete[] iter->second;
+		}
+	}
 private:
 #ifdef TARGET_MAC
 	std::map<TypeKey, TypeValue *> pageTable;
@@ -65,4 +72,5 @@ private:
 	std::unordered_map<TypeKey, TypeValue *> pageTable;
 #endif
 	CacheItem cache[4096];
+	CachedDict(CachedDict&);
 };

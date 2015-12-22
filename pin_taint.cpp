@@ -5,22 +5,27 @@
 #include "common.h"
 #include "CachedDict.h"
 #include "ShadowCpu.h"
+#include "ShadowMemory.h"
 #include "utils.h"
 #ifdef TARGET_WINDOWS
 ADDRINT SYS_ReadFile;
 #define SYSCALL_ARG_COUNT 12
 #else
-#define SYSCALL_ARG_COUNT 4
+#define SYSCALL_ARG_COUNT 6
 #endif
 
 KNOB<string> KnobOutputFilePath(KNOB_MODE_WRITEONCE,  "pintool",
-    "o", "", "specify file name for pin_taint output (default stdout)");
+    "o", "", "specify file name for pin_taint output (default empty, stdout)");
+KNOB<string> KnobTaintSourceSuffix(KNOB_MODE_WRITEONCE,  "pintool",
+    "s", "", "specify a suffix of the taint souce's fullpath");
+char taintSourceSuffix[2048];
 
-CachedDict<ADDRINT, UINT8> shadow_taint_memory;
+TAG_t global_total_taint = 0;
 
+
+ShadowMemory shadowMemory;
 ShadowCpu * global_contexts[1024];
 int  global_icount = 0;
-PIN_RWMUTEX mutex;
 bool global_taint_enable;
 struct InputSyscallRecord
 {
@@ -38,29 +43,43 @@ InputSyscallRecord global_syscall_record[1024];
 
 CachedDict<ADDRINT, InstRegRecord *> global_inst_reg_record;
 
-VOID doTaint(ADDRINT addr, ADDRINT size, UINT8 tag)
+bool check_fd_handle(ADDRINT fd)
 {
-	PIN_RWMutexWriteLock(&mutex);
+	char path[0x10000];
+#ifdef TARGET_WINDOWS
+	get_fullpath_from_fd_handle((void*)fd, path);
+#else
+	get_fullpath_from_fd_handle((int)fd, path);
+#endif
+	MSG("from file:%s", path);
+	return isStrEndWith(path, taintSourceSuffix);
+}
+VOID doTaint(ADDRINT addr, ADDRINT size, TAG_t tag)
+{
+	shadowMemory.lock();
+	MSG("taged as 0x%" FORMAT_TAG_X ":0x%" FORMAT_TAG_X, global_total_taint+1, (TAG_t)(global_total_taint+size+1));
 	for (ADDRINT i = 0; i != size; i++)
 	{
-		shadow_taint_memory[addr+i] |= tag;
+		//shadowMemory[addr+i] |= tag;
+		shadowMemory[addr+i] = (++global_total_taint);
 	}
 	MSG("[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] source tainted", addr, addr+size);
-	MSG("xx %4s", (char *)addr);
     global_taint_enable = true;
-	PIN_RWMutexUnlock(&mutex);
+	shadowMemory.unlock();
 }
+
 VOID BeforeSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID *)
 {
 	if (threadIndex >= sizeof(global_contexts) / sizeof(CONTEXT *))
 		ERROR("thread_id %d is larger than size of global_contexts", threadIndex);	
 	global_syscall_record[threadIndex].syscall_num = PIN_GetSyscallNumber(ctxt, std);
-	MSG("SYSCALL 0x%" FORMAT_ADDR_X " BeforeSyscall", global_syscall_record[threadIndex].syscall_num);
+	//MSG("SYSCALL 0x%" FORMAT_ADDR_X " BeforeSyscall", global_syscall_record[threadIndex].syscall_num);
 	for (int i = 0; i < SYSCALL_ARG_COUNT; i ++)
 	{
 		global_syscall_record[threadIndex].args[i] = PIN_GetSyscallArgument(ctxt, std, i);
 	}
 }
+
 VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOID *)
 {
 	if (threadIndex >= sizeof(global_contexts) / sizeof(CONTEXT *))
@@ -75,22 +94,28 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 #endif
 #ifndef TARGET_WINDOWS //Linux or Mac
 	if (retv == (ADDRINT)-1) return;
-	if (syscall_num == SYS_recvfrom)
-		doTaint(record.args[1], retv, 1);
+	//if (syscall_num == SYS_recvfrom)
+	//	doTaint(record.args[1], retv, 1);
 	#ifdef TARGET_LINUX
 	else if (syscall_num == SYS_read)
 	#else 
 	else if (syscall_num == SYS_read || syscall_num == SYS_read_nocancel)
 	#endif
 	{
-		char path[0x2000];
-		get_fullpath_from_fd_handle((int)record.args[0], path);
-		MSG("from file:%s", path);
-		doTaint(record.args[1], retv, 1);
+		if (check_fd_handle(record.args[0]))
+		{
+			doTaint(record.args[1], retv, 1);
+		}
+	}
+	else if (syscall_num == SYS_mmap)
+	{
+		if (check_fd_handle(record.args[4]))
+		{
+			doTaint(retv, record.args[1], 1);
+		}
 	}
 #else    //Windows
 	if (retv < 0) return;
-	MSG("%x is called bak", syscall_num);
 	/*
 		NTSTATUS ZwReadFile(
 		_In_     HANDLE           FileHandle,
@@ -119,14 +144,14 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 	*/
 	if (syscall_num == SYS_ReadFile)
 	{
-		char path[0x2000];
-		get_fullpath_from_fd_handle((void *)record.args[0], path);
-		MSG("from file:%s", path);
-		doTaint(record.args[5], ((ADDRINT *) record.args[4])[1], 1);
+		if (check_fd_handle(record.args[0]))
+		{
+			doTaint(record.args[5], ((ADDRINT *) record.args[4])[1], 1);
+		}
 	}
 #endif
 }
-VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI_MEM_ACCESS_INFO* muliti_mem_access_info, const InstRegRecord * instRegRecord)
+VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI_MEM_ACCESS_INFO* muliti_mem_access_info, const InstRegRecord * instRegRecord, ADDRINT gsp)
 {
 	global_icount += 1;
 	if (!global_taint_enable) return;
@@ -140,6 +165,7 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 	TAG_t taint[16];
 	memset(&taint, 0, sizeof(taint));
 	REG reg;
+	bool mixed = false;
 	for (int i = 0; i != instRegRecord->numberOfReadRegs; i++)
 	{
 		reg = instRegRecord->readRegs[i];
@@ -147,6 +173,9 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 		for (UINT32 j = 0; j < REG_Size(reg); j++)
 		{
 			//MSG("[%" FORMAT_ADDR_X "]" "read %s", inst_addr, REG_StringShort(reg).c_str());
+			if (taint[j] && readTag[j] && taint[j] != readTag[j]) mixed = true;
+			if (readTag[j] == 0xffffffff) mixed = true;
+			if (readTag[j] &&  readTag[j] != 0xffffffff) MSG("tag-reg-0x%" FORMAT_TAG_X " at inst 0x%" FORMAT_ADDR_X " and sp:0x%" FORMAT_ADDR_X " regname:%s", readTag[j], inst_addr, gsp, REG_StringShort(reg).c_str());
 			taint[j] |= readTag[j];
 		}
 	}
@@ -160,7 +189,7 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 		}
 	}
 	//if (tainted) MSG("Source reg tainted at inst 0x%" FORMAT_ADDR_X,inst_addr);
-	PIN_RWMutexWriteLock(&mutex);
+	shadowMemory.lock();
 	if (muliti_mem_access_info)
 	{
 		for (UINT32 i = 0; i != muliti_mem_access_info->numberOfMemops; i++)
@@ -170,7 +199,12 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 			{
 				for (ADDRINT index = 0; index != info.bytesAccessed; index++)
 				{
-					taint[index] |= shadow_taint_memory[info.memoryAddress+index];
+					TAG_t t = shadowMemory[info.memoryAddress + index];
+					if (t) MSG("SOURCE MEM taint %" FORMAT_ADDR_X, info.memoryAddress+index);
+					if (t && t != 0xffffffff) MSG("tag-mem-0x%" FORMAT_TAG_X " at inst 0x%" FORMAT_ADDR_X " and sp:0x%" FORMAT_ADDR_X, t, inst_addr, gsp);
+					if (taint[index] && t && taint[index] != t) mixed = true;
+					if (t == 0xffffffff) mixed = true;
+					taint[index] |= t;
 				}
 			}
 		}
@@ -185,6 +219,7 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 		}
 	}
 	bool memSink = false;
+	if (tainted && mixed) MSG("although tainted, but tag mixed, so fully tag it at 0x%" FORMAT_ADDR_X, inst_addr);
 	if (muliti_mem_access_info)
 	{
 		for (UINT32 i = 0; i != muliti_mem_access_info->numberOfMemops; i++)
@@ -193,21 +228,27 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 			if (info.memopType == PIN_MEMOP_STORE)
 			{
 				memSink = true;
-				if (tainted && memSink)
+				if (tainted && memSink && !mixed)
 				{
 					MSG("TAINTED mem[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] at inst 0x%" FORMAT_ADDR_X,
 						info.memoryAddress,
 						info.memoryAddress + info.bytesAccessed,
 						inst_addr);
-					
+
+					for (ADDRINT index = 0; index != info.bytesAccessed; index++)
+						shadowMemory[info.memoryAddress + index] = taint[index];
 				}
-				for (ADDRINT index=0; index != info.bytesAccessed; index++)
-					shadow_taint_memory[info.memoryAddress+index] = taint[index];
+				else if (tainted && memSink && mixed)
+					for (ADDRINT index = 0; index != info.bytesAccessed; index++)
+						shadowMemory[info.memoryAddress + index] = 0xffffffff;
+				else
+					for (ADDRINT index = 0; index != info.bytesAccessed; index++)
+						shadowMemory[info.memoryAddress + index] = 0x0;
 			}
 		}
 	}
 	//if (tainted) MSG("Source reg tainted at inst 0x%" FORMAT_ADDR_X,inst_addr);
-	PIN_RWMutexUnlock(&mutex);
+	shadowMemory.unlock();
 
 	for (int i = 0; i != instRegRecord->numberOfWriteRegs; i++)
 	{
@@ -219,6 +260,8 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 		{
 			continue;
 		}
+		if (mixed)
+			memset(writeTag, 0xff, REG_Size(reg) * sizeof(TAG_t));
 		MSG("TAINTED %s at inst 0x%" FORMAT_ADDR_X,REG_StringShort(reg).c_str(), inst_addr);
 		memcpy(writeTag, &taint[0], REG_Size(reg) * sizeof(TAG_t));
 		
@@ -228,7 +271,7 @@ VOID InstrunctionInstrument(INS ins, VOID *)
 {
 	bool hasRead = (INS_RegR(ins, 0) != REG_INVALID_) || (INS_IsMemoryRead(ins));
 	bool hasWrite = (INS_RegW(ins, 0) != REG_INVALID_) || (INS_IsMemoryWrite(ins));
-	bool hasMem = (INS_IsMemoryRead(ins) || INS_IsMemoryWrite(ins)); 
+	bool hasMem = (INS_IsMemoryRead(ins) || INS_IsMemoryWrite(ins) || INS_HasMemoryRead2(ins)); 
 	//if ((INS_Address(ins)&0xffffffff) != INS_Address(ins)) return;
 	if (hasRead && hasWrite)
 	{
@@ -279,6 +322,7 @@ VOID InstrunctionInstrument(INS ins, VOID *)
 					IARG_INST_PTR ,
 					IARG_MULTI_MEMORYACCESS_EA, 
 					IARG_PTR, instRegRecord,
+					IARG_REG_VALUE, REG_STACK_PTR,
 					IARG_END);
 		else
 			INS_InsertPredicatedCall(ins,
@@ -288,6 +332,7 @@ VOID InstrunctionInstrument(INS ins, VOID *)
 					IARG_INST_PTR ,
 					IARG_PTR, NULL,
 					IARG_PTR, instRegRecord,
+					IARG_REG_VALUE, REG_STACK_PTR,
 					IARG_END);
 
 	}
@@ -330,6 +375,7 @@ int main(int argc, char *argv[])
 		KnobOutputFile = fopen(KnobOutputFilePath.Value().c_str(), "w+");
 		if (!KnobOutputFile) {printf("Open Log File %s fails!..", KnobOutputFilePath.Value().c_str()); fflush(stdout); exit(1);}
 	}
+	strcpy(taintSourceSuffix, KnobTaintSourceSuffix.Value().c_str());
 
 	INS_AddInstrumentFunction ((INS_INSTRUMENT_CALLBACK) InstrunctionInstrument, NULL);
 	PIN_AddSyscallEntryFunction((SYSCALL_ENTRY_CALLBACK) BeforeSyscall, NULL);

@@ -53,3 +53,5 @@ typedef int32_t int_t;
 #endif
 
 typedef uint32_t TAG_t;
+#define FORMAT_TAG_X PRIx32
+#define FORMAT_TAG_U PRIu32

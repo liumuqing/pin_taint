@@ -46,3 +46,13 @@ void get_fullpath_from_fd_handle(int fd, char * path)
 		ERROR("cant get filepath of fd:%d", fd);
 }
 #endif
+
+#include <string.h>
+bool isStrEndWith(const char * haystack, const char* needle)
+{
+	size_t len = strlen(haystack);
+	size_t l = strlen(needle);
+	if (l <= len && strcmp(&haystack[len-l], needle) == 0) return true;
+	return false;
+}
+

@@ -37,7 +37,7 @@ void ShadowCpu::staticInit()
 		end = j;
 		if (s!= end-start || (s % 2 != 0 && s!=1)) ERROR("can't init _RegOffsetList[%s], because this register occupy multiple pieces of memory!", REG_StringShort(r).c_str());
 		else _RegOffsetList[r] = start;
-		offset_for_xmm_ymm_xmm = (offset_for_xmm_ymm_xmm>_RegOffsetList[r]?offset_for_xmm_ymm_xmm:_RegOffsetList[r]);
+		offset_for_xmm_ymm_xmm = (offset_for_xmm_ymm_xmm>end?offset_for_xmm_ymm_xmm:end);
 		if (!_RegOffsetList[r]) ERROR("_RegOffsetList[%s] is initialzed as zero, something wrong...maybe PIN API changed?", REG_StringShort(r).c_str());
 	}
 	for (REG r = REG_XMM_BASE; r != REG_ZMM_LAST; r= REG(((int)r)+1))

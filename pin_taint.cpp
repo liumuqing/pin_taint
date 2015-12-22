@@ -5,13 +5,16 @@
 #include "common.h"
 #include "CachedDict.h"
 #include "ShadowCpu.h"
-
+#include "utils.h"
 #ifdef TARGET_WINDOWS
 ADDRINT SYS_ReadFile;
-#define SYSCALL_ARG_COUNT 8
+#define SYSCALL_ARG_COUNT 12
 #else
-ADDRINT SYS_ReadFIle;
+#define SYSCALL_ARG_COUNT 4
 #endif
+
+KNOB<string> KnobOutputFilePath(KNOB_MODE_WRITEONCE,  "pintool",
+    "o", "", "specify file name for pin_taint output (default stdout)");
 
 CachedDict<ADDRINT, UINT8> shadow_taint_memory;
 
@@ -43,7 +46,7 @@ VOID doTaint(ADDRINT addr, ADDRINT size, UINT8 tag)
 		shadow_taint_memory[addr+i] |= tag;
 	}
 	MSG("[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] source tainted", addr, addr+size);
-	MSG("xx %04s", (char *)addr);
+	MSG("xx %4s", (char *)addr);
     global_taint_enable = true;
 	PIN_RWMutexUnlock(&mutex);
 }
@@ -52,6 +55,7 @@ VOID BeforeSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VO
 	if (threadIndex >= sizeof(global_contexts) / sizeof(CONTEXT *))
 		ERROR("thread_id %d is larger than size of global_contexts", threadIndex);	
 	global_syscall_record[threadIndex].syscall_num = PIN_GetSyscallNumber(ctxt, std);
+	MSG("SYSCALL 0x%" FORMAT_ADDR_X " BeforeSyscall", global_syscall_record[threadIndex].syscall_num);
 	for (int i = 0; i < SYSCALL_ARG_COUNT; i ++)
 	{
 		global_syscall_record[threadIndex].args[i] = PIN_GetSyscallArgument(ctxt, std, i);
@@ -73,18 +77,52 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 	if (retv == (ADDRINT)-1) return;
 	if (syscall_num == SYS_recvfrom)
 		doTaint(record.args[1], retv, 1);
-#ifdef TARGET_LINUX
+	#ifdef TARGET_LINUX
 	else if (syscall_num == SYS_read)
-#else 
+	#else 
 	else if (syscall_num == SYS_read || syscall_num == SYS_read_nocancel)
-#endif
+	#endif
+	{
+		char path[0x2000];
+		get_fullpath_from_fd_handle((int)record.args[0], path);
+		MSG("from file:%s", path);
 		doTaint(record.args[1], retv, 1);
+	}
 #else    //Windows
 	if (retv < 0) return;
 	MSG("%x is called bak", syscall_num);
+	/*
+		NTSTATUS ZwReadFile(
+		_In_     HANDLE           FileHandle,
+		_In_opt_ HANDLE           Event,
+		_In_opt_ PIO_APC_ROUTINE  ApcRoutine,
+		_In_opt_ PVOID            ApcContext,
+		_Out_    PIO_STATUS_BLOCK IoStatusBlock,
+		_Out_    PVOID            Buffer,
+		_In_     ULONG            Length,
+		_In_opt_ PLARGE_INTEGER   ByteOffset,
+		_In_opt_ PULONG           Key
+		);
+
+		typedef struct _IO_STATUS_BLOCK {
+			union {
+				NTSTATUS Status;
+				PVOID    Pointer;
+			};
+			ULONG_PTR Information;
+		} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
+	
+		**Information**
+			This is set to a request-dependent value. For example, on successful completion of a transfer request, 
+			this is set to the number of bytes transferred. If a transfer request is completed with another 
+			STATUS_XXX, this member is set to zero.
+	*/
 	if (syscall_num == SYS_ReadFile)
 	{
-		doTaint(record.args[5], record.args[6], 1);
+		char path[0x2000];
+		get_fullpath_from_fd_handle((void *)record.args[0], path);
+		MSG("from file:%s", path);
+		doTaint(record.args[5], ((ADDRINT *) record.args[4])[1], 1);
 	}
 #endif
 }
@@ -257,9 +295,11 @@ VOID InstrunctionInstrument(INS ins, VOID *)
 }
 int Usage()
 {
-	MSG("Usage");
+	printf("Usage:\n");
+    printf("%s\n", KNOB_BASE::StringKnobSummary().c_str());
 	return -1;
 }
+
 int main(int argc, char *argv[])
 {
 	// Initialize PIN library. Print help message if -h(elp) is specified
@@ -274,16 +314,10 @@ int main(int argc, char *argv[])
 	//else if  (IsWindows7OrGreater()) {SYS_ReadFile = 0x0111;}
 	//else if  (IsWindowsVistaOrGreater()) {SYS_ReadFile = 0x0102;}
 	//else if  (IsWindowsXPOrGreater()) {SYS_ReadFile = 0x00adb7;}
-	SYS_ReadFile = 0xffff;
+	SYS_ReadFile = 0x0003;
 #endif
 #if BITS==64
 	if (1 == 2);
-	//else if (IsWindows10OrGreater()) {SYS_ReadFIle = 0x10000000;}
-	//else if  (IsWindows8Point1OrGreater()) {SYS_ReadFile = 0x008a;}
-	//else if  (IsWindows8OrGreater()) {SYS_ReadFile = 0x0087;}
-	//else if  (IsWindows7OrGreater()) {SYS_ReadFile = 0x0111;}
-	//else if  (IsWindowsVistaOrGreater()) {SYS_ReadFile = 0x0102;}
-	//else if  (IsWindowsXPOrGreater()) {SYS_ReadFile = 0x00adb7;}
 	SYS_ReadFile = 0x0003;
 #endif
 #endif
@@ -291,7 +325,12 @@ int main(int argc, char *argv[])
 	{
 		return Usage();
 	}
-	//LEVEL_PINCLIENT::
+	if (KnobOutputFilePath.Value() != "")
+	{
+		KnobOutputFile = fopen(KnobOutputFilePath.Value().c_str(), "w+");
+		if (!KnobOutputFile) {printf("Open Log File %s fails!..", KnobOutputFilePath.Value().c_str()); fflush(stdout); exit(1);}
+	}
+
 	INS_AddInstrumentFunction ((INS_INSTRUMENT_CALLBACK) InstrunctionInstrument, NULL);
 	PIN_AddSyscallEntryFunction((SYSCALL_ENTRY_CALLBACK) BeforeSyscall, NULL);
 	PIN_AddSyscallExitFunction((SYSCALL_ENTRY_CALLBACK) AfterSyscall, NULL);

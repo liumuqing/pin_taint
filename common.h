@@ -4,12 +4,12 @@
 #include <stdint.h>
 #include <inttypes.h>
 
+extern FILE * KnobOutputFile;
 
-//#define BIGENDIAN
 #define DEBUG
-#define ERROR(fmt, ...) (printf("[ERROR]" fmt "\n", ##__VA_ARGS__), exit(1))
+#define ERROR(fmt, ...) (fprintf(KnobOutputFile, "[ERROR]" fmt "\n", ##__VA_ARGS__), fflush(KnobOutputFile), exit(1))
 #ifdef DEBUG
-	#define MSG(fmt, ...) printf("[MSG]" fmt "\n", ##__VA_ARGS__)
+	#define MSG(fmt, ...) (fprintf(KnobOutputFile, "[MSG]" fmt "\n", ##__VA_ARGS__), fflush(KnobOutputFile))
 #else
 	#define MSG(fmt, ...) 
 #endif

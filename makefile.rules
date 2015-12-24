@@ -72,9 +72,12 @@ LIB_ROOTS :=
 
 # This section contains the build rules for all binaries that have special build rules.
 # See makefile.default.rules for the default build rules.
+OBJDIR := $(shell uname)-$(OBJDIR)
+
 SRCS := $(wildcard *.cpp)
 DEPS := $(addprefix $(OBJDIR), $(patsubst %.cpp,%.d,$(SRCS)))
 OBJS := $(patsubst %.d,%$(OBJ_SUFFIX),$(DEPS)) 
+
 objects : $(OBJDIR) $(OBJS)
 libs: $(OBJDIR)$(TEST_TOOL_ROOTS)$(PINTOOL_SUFFIX)
 dlls:
@@ -87,9 +90,12 @@ clean:
 TOOL_CXXFLAGS := $(TOOL_CXXFLAGS) -DBITS=$(BITS)
 $(OBJDIR):
 	mkdir $(OBJDIR)
-$(OBJDIR)%$(OBJ_SUFFIX): %.cpp| $(OBJDIR)
-	$(CXX) $(TOOL_CXXFLAGS) -std=c++11 $(COMP_OBJ)$@ $(patsubst $(OBJDIR)%$(OBJ_SUFFIX),%.cpp,$@)
+$(OBJDIR)%$(OBJ_SUFFIX): %.cpp $(OBJDIR)%.d | $(OBJDIR)
+	$(CXX) $(TOOL_CXXFLAGS) -MT $@ -MMD -MP -MF $(OBJDIR)$*.Td -std=c++11 $(COMP_OBJ)$@ $(patsubst $(OBJDIR)%$(OBJ_SUFFIX),%.cpp,$@)
+	mv -f $(OBJDIR)$*.Td $(OBJDIR)$*.d
 $(OBJDIR)$(TEST_TOOL_ROOTS)$(PINTOOL_SUFFIX): $(OBJS) | $(OBJDIR)
 	$(LINKER) $(TOOL_LDFLAGS) $(LINK_EXE)$@ $(^:%.h=) $(TOOL_LPATHS) $(TOOL_LIBS)
+$(OBJDIR)%.d: ;
+include $(DEPS)
 info:
 	echo $(BITS)

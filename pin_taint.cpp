@@ -7,6 +7,7 @@
 #include "ShadowCpu.h"
 #include "ShadowMemory.h"
 #include "utils.h"
+#include <unistd.h>
 #ifdef TARGET_WINDOWS
 ADDRINT SYS_ReadFile;
 #define SYSCALL_ARG_COUNT 12
@@ -107,11 +108,28 @@ VOID AfterSyscall(THREADID threadIndex, CONTEXT *ctxt, SYSCALL_STANDARD std, VOI
 			doTaint(record.args[1], retv, 1);
 		}
 	}
+	else if (syscall_num == SYS_lseek)
+	{
+		if(check_fd_handle(record.args[0]))
+		{
+			MSG("lseek to pos 0x%" FORMAT_ADDR_X, retv);
+			global_total_taint = retv;
+		}
+	}
 	else if (syscall_num == SYS_mmap)
 	{
 		if (check_fd_handle(record.args[4]))
 		{
+			global_total_taint = record.args[5];
 			doTaint(retv, record.args[1], 1);
+		}
+	}
+	else if (syscall_num == SYS_open)
+	{
+		if (check_fd_handle(retv))
+		{
+			MSG("open source file!");
+			global_total_taint = 0;
 		}
 	}
 #else    //Windows
@@ -157,12 +175,14 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 	if (!global_taint_enable) return;
 	if (thread_id >= sizeof(global_contexts) / sizeof(CONTEXT *))
 		ERROR("thread_id %d is larger than size of global_contexts", thread_id);
+	//MSG("0x%" FORMAT_ADDR_X, inst_addr);
 	ShadowCpu * context = global_contexts[thread_id];
 	if (!context) context = new ShadowCpu;
 	if (!context) ERROR("malloc new context for thread %d fail", thread_id);
+	if ((inst_addr & 0xffff) == 0x9f78)MSG("xx0");
 
 	global_contexts[thread_id] = context;
-	TAG_t taint[16];
+	TAG_t taint[32];
 	memset(&taint, 0, sizeof(taint));
 	REG reg;
 	bool mixed = false;
@@ -172,15 +192,15 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 		TAG_t * readTag = context->getTagPointerOfReg(reg);
 		for (UINT32 j = 0; j < REG_Size(reg); j++)
 		{
-			//MSG("[%" FORMAT_ADDR_X "]" "read %s", inst_addr, REG_StringShort(reg).c_str());
 			if (taint[j] && readTag[j] && taint[j] != readTag[j]) mixed = true;
 			if (readTag[j] == 0xffffffff) mixed = true;
 			if (readTag[j] &&  readTag[j] != 0xffffffff) MSG("tag-reg-0x%" FORMAT_TAG_X " at inst 0x%" FORMAT_ADDR_X " and sp:0x%" FORMAT_ADDR_X " regname:%s", readTag[j], inst_addr, gsp, REG_StringShort(reg).c_str());
-			taint[j] |= readTag[j];
+			if (readTag[j])
+				taint[j] = readTag[j];
 		}
 	}
 	bool tainted = false;
-	for (ADDRINT i = 0; i < 16; i++)
+	for (ADDRINT i = 0; i < 32; i++)
 	{
 		if (taint[i]) 
 		{
@@ -190,6 +210,7 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 	}
 	//if (tainted) MSG("Source reg tainted at inst 0x%" FORMAT_ADDR_X,inst_addr);
 	shadowMemory.lock();
+	if ((inst_addr & 0xffff) == 0x9f78)MSG("xx1");
 	if (muliti_mem_access_info)
 	{
 		for (UINT32 i = 0; i != muliti_mem_access_info->numberOfMemops; i++)
@@ -200,17 +221,18 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 				for (ADDRINT index = 0; index != info.bytesAccessed; index++)
 				{
 					TAG_t t = shadowMemory[info.memoryAddress + index];
-					if (t) MSG("SOURCE MEM taint %" FORMAT_ADDR_X, info.memoryAddress+index);
+					//if (t) MSG("SOURCE MEM taint %" FORMAT_ADDR_X, info.memoryAddress+index);
 					if (t && t != 0xffffffff) MSG("tag-mem-0x%" FORMAT_TAG_X " at inst 0x%" FORMAT_ADDR_X " and sp:0x%" FORMAT_ADDR_X, t, inst_addr, gsp);
 					if (taint[index] && t && taint[index] != t) mixed = true;
 					if (t == 0xffffffff) mixed = true;
-					taint[index] |= t;
+					if (t)
+						taint[index] = t;
 				}
 			}
 		}
 	}
 	//bool tainted = false;
-	for (ADDRINT i = 0; i < 16; i++)
+	for (ADDRINT i = 0; i < 32; i++)
 	{
 		if (taint[i]) 
 		{
@@ -219,6 +241,7 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 		}
 	}
 	bool memSink = false;
+	if ((inst_addr & 0xffff) == 0x9f78)MSG("xx2");
 	if (tainted && mixed) MSG("although tainted, but tag mixed, so fully tag it at 0x%" FORMAT_ADDR_X, inst_addr);
 	if (muliti_mem_access_info)
 	{
@@ -229,6 +252,7 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 			{
 				memSink = true;
 				if (tainted && memSink && !mixed)
+				//if (tainted && memSink && isMov)
 				{
 					MSG("TAINTED mem[0x%" FORMAT_ADDR_X ":0x%" FORMAT_ADDR_X "] at inst 0x%" FORMAT_ADDR_X,
 						info.memoryAddress,
@@ -252,18 +276,20 @@ VOID BeforeEachTraserInstrucion(THREADID thread_id, ADDRINT inst_addr, PIN_MULTI
 
 	for (int i = 0; i != instRegRecord->numberOfWriteRegs; i++)
 	{
+		if ((inst_addr & 0xffff) == 0x9f78) MSG("xx3");
 		reg = instRegRecord->writeRegs[i];
-		//if (reg>=REG_MACHINE_LAST || reg == REG_X87) continue;
 		TAG_t * writeTag = context->getTagPointerOfReg(reg);
 		memset(writeTag, 0, REG_Size(reg) * sizeof(TAG_t));
 		if ((!tainted) || memSink || (instRegRecord->numberOfWriteRegs > 1 && reg == REG_STACK_PTR))
+		//if ((!tainted) || memSink || (instRegRecord->numberOfWriteRegs > 1 && reg == REG_STACK_PTR) || !isMov)
 		{
 			continue;
 		}
 		if (mixed)
 			memset(writeTag, 0xff, REG_Size(reg) * sizeof(TAG_t));
+		else
+			memcpy(writeTag, &taint[0], REG_Size(reg) * sizeof(TAG_t));
 		MSG("TAINTED %s at inst 0x%" FORMAT_ADDR_X,REG_StringShort(reg).c_str(), inst_addr);
-		memcpy(writeTag, &taint[0], REG_Size(reg) * sizeof(TAG_t));
 		
 	}
 }

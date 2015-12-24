@@ -11,7 +11,7 @@ private:
 	static uint32_t _RegOffsetList[REG_APPLICATION_LAST+1];
 	static bool _isStaticInited;
 	static void staticInit();
-	TAG_t _tags[REG_APPLICATION_LAST*16+16];
+	TAG_t _tags[REG_APPLICATION_LAST*64];
 public:
 	TAG_t * getTagPointerOfReg(REG reg);
 };

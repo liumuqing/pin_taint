@@ -14,7 +14,7 @@ void ShadowCpu::staticInit()
 	CONTEXT _c;
 	PIN_REGISTER _r;
 	memset(&_r, 1, sizeof(_r));
-	uint32_t offset_for_xmm_ymm_xmm = 0;
+	uint32_t offset_for_xmm_ymm_zmm = 0;
 	for (REG r = REG_APPLICATION_BASE; r != REG_APPLICATION_LAST; r= REG(((int)r)+1))
 	{
 		if (!REG_valid_for_iarg_reg_value(r)) continue;
@@ -37,13 +37,14 @@ void ShadowCpu::staticInit()
 		end = j;
 		if (s!= end-start || (s % 2 != 0 && s!=1)) ERROR("can't init _RegOffsetList[%s], because this register occupy multiple pieces of memory!", REG_StringShort(r).c_str());
 		else _RegOffsetList[r] = start;
-		offset_for_xmm_ymm_xmm = (offset_for_xmm_ymm_xmm>end?offset_for_xmm_ymm_xmm:end);
+		offset_for_xmm_ymm_zmm = (offset_for_xmm_ymm_zmm>end?offset_for_xmm_ymm_zmm:end);
 		if (!_RegOffsetList[r]) ERROR("_RegOffsetList[%s] is initialzed as zero, something wrong...maybe PIN API changed?", REG_StringShort(r).c_str());
 	}
-	for (REG r = REG_XMM_BASE; r != REG_ZMM_LAST; r= REG(((int)r)+1))
+	for (REG r = REG_XMM_BASE; r != REG_ZMM_LAST+1; r= REG(((int)r)+1))
 	{
-		if (!REG_is_xmm_ymm_zmm(r)) continue;
-		_RegOffsetList[r] = offset_for_xmm_ymm_xmm; offset_for_xmm_ymm_xmm += 16;
+		if (!REG_is_xmm(r)) continue;
+		_RegOffsetList[r+REG_YMM0-REG_XMM0] = offset_for_xmm_ymm_zmm;
+		_RegOffsetList[r] = offset_for_xmm_ymm_zmm; offset_for_xmm_ymm_zmm += 32;
 	}
 	/*
 	_RegOffsetList[REG_RAX] = 8;
